@@ -1,0 +1,8 @@
+apply plugin: "java-library"
+
+dependencies {
+  api "com.badlogicgames.gdx:gdx:$gdxVersion"
+
+  // Ito ang kailangan para sa VisUI (Version 1.5.0 ang stable para sa 2026)
+  api "com.kotcrab.vis:vis-ui:1.5.0"
+}
