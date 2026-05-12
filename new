@@ -1,0 +1,349 @@
+package com.brv.disasterrun;
+
+import com.badlogic.gdx.Gdx;
+import com.badlogic.gdx.Input;
+import com.badlogic.gdx.Screen;
+import com.badlogic.gdx.graphics.Color;
+import com.badlogic.gdx.graphics.GL20;
+import com.badlogic.gdx.graphics.PerspectiveCamera;
+import com.badlogic.gdx.graphics.g2d.BitmapFont;
+import com.badlogic.gdx.graphics.g2d.TextureAtlas;
+import com.badlogic.gdx.graphics.g3d.utils.AnimationController;
+import com.badlogic.gdx.math.MathUtils;
+import com.badlogic.gdx.math.Vector3;
+import com.badlogic.gdx.scenes.scene2d.Stage;
+import com.badlogic.gdx.scenes.scene2d.ui.Image;
+import com.badlogic.gdx.scenes.scene2d.ui.Label;
+import com.badlogic.gdx.scenes.scene2d.ui.ProgressBar;
+import com.badlogic.gdx.scenes.scene2d.ui.Skin;
+import com.badlogic.gdx.scenes.scene2d.ui.Stack;
+import com.badlogic.gdx.scenes.scene2d.ui.Table;
+import com.badlogic.gdx.utils.Align;
+import com.badlogic.gdx.utils.Array;
+import com.badlogic.gdx.utils.viewport.ScreenViewport;
+import net.mgsx.gltf.loaders.glb.GLBLoader;
+import net.mgsx.gltf.scene3d.attributes.PBRColorAttribute;
+import net.mgsx.gltf.scene3d.attributes.PBRCubemapAttribute;
+import net.mgsx.gltf.scene3d.lights.DirectionalLightEx;
+import net.mgsx.gltf.scene3d.scene.Scene;
+import net.mgsx.gltf.scene3d.scene.SceneAsset;
+import net.mgsx.gltf.scene3d.scene.SceneManager;
+import net.mgsx.gltf.scene3d.shaders.PBRShaderConfig;
+import net.mgsx.gltf.scene3d.shaders.PBRShaderProvider;
+import net.mgsx.gltf.scene3d.utils.IBLBuilder;
+
+public class DisasterRunGame implements Screen {
+    private final Main game;
+    private SceneAsset sceneAsset, groundAsset;
+    private SceneManager sceneManager;
+    private Scene characterScene;
+    private Array<Scene> groundScenes = new Array<>();
+    private PerspectiveCamera cam;
+    private AnimationController animationController;
+    private Stage stage;
+    private Skin skin;
+    private ProgressBar healthBar;
+    private Label scoreLabel;
+    private float score = 0;
+
+    private TextureAtlas uiAtlas;
+    private Image energyFill, shieldFill;
+    private float energy = 1.0f;
+    private float shield = 1.0f;
+
+    private final Vector3 characterPosition = new Vector3(0, 0, 0);
+    private final float moveSpeed = 5f;
+    private float verticalVelocity = 0;
+    private final float gravity = -15f;
+    private final float jumpForce = 6f;
+    private boolean isGrounded = true;
+
+    private String currentAnimation = "";
+    private final float characterScale = 0.3f;
+
+    private float camPitch = -20f;
+    private float camYaw = 180f;
+    private final float mouseSensitivity = 0.15f;
+
+    // --- ROAD SETTINGS ---
+    private final float roadLength = 10f;
+    private final float roadScrollSpeed = 8f;
+    private final Vector3 roadMoveDirection = new Vector3(); // Vector para sa galaw ng kalsada
+
+    public DisasterRunGame(Main game) {
+        this.game = game;
+
+        PBRShaderConfig config = PBRShaderProvider.createDefaultConfig();
+        config.numBones = 64;
+        config.numBoneWeights = 8;
+        sceneManager = new SceneManager(new PBRShaderProvider(config), null);
+
+        sceneAsset = new GLBLoader().load(Gdx.files.internal("models/character_05.glb"));
+        characterScene = new Scene(sceneAsset.scene);
+        sceneManager.addScene(characterScene);
+
+        try {
+            groundAsset = new GLBLoader().load(Gdx.files.internal("models/road_straight.glb"));
+
+            for(int i = 0; i < 10; i++) {
+                Scene roadTile = new Scene(groundAsset.scene);
+                roadTile.modelInstance.transform.setTranslation(0, 0, i * roadLength);
+                groundScenes.add(roadTile);
+                sceneManager.addScene(roadTile);
+            }
+        } catch (Exception e) {
+            Gdx.app.error("GROUND", "Missing models/road_straight.glb!");
+        }
+
+        animationController = new AnimationController(characterScene.modelInstance);
+        setAnimation("idle", -1);
+
+        cam = new PerspectiveCamera(67, Gdx.graphics.getWidth(), Gdx.graphics.getHeight());
+        cam.near = 0.1f;
+        cam.far = 1000f;
+        sceneManager.setCamera(cam);
+
+        DirectionalLightEx light = new DirectionalLightEx();
+        light.direction.set(1, -3, 1).nor();
+        light.color.set(Color.WHITE);
+        light.color.mul(1.5f);
+
+        sceneManager.environment.add(light);
+        IBLBuilder iblBuilder = IBLBuilder.createOutdoor(light);
+        sceneManager.environment.set(new PBRCubemapAttribute(PBRCubemapAttribute.DiffuseEnv, iblBuilder.buildIrradianceMap(256)));
+        sceneManager.environment.set(new PBRCubemapAttribute(PBRCubemapAttribute.SpecularEnv, iblBuilder.buildRadianceMap(10)));
+        iblBuilder.dispose();
+
+        sceneManager.setAmbientLight(0.8f);
+
+        uiAtlas = new TextureAtlas(Gdx.files.internal("ui-packed/ui_atlas.atlas"));
+        stage = new Stage(new ScreenViewport());
+
+        Table table = new Table();
+        table.top().left().pad(30);
+        table.setFillParent(true);
+
+        TextureAtlas.AtlasRegion barRegion = uiAtlas.findRegion("bar_round_gloss_large");
+        TextureAtlas.AtlasRegion scoreRegion = uiAtlas.findRegion("button_square_header_blade_rectangle_screws");
+
+        Stack energyStack = new Stack();
+        if (barRegion != null) {
+            Image energyBg = new Image(barRegion);
+            energyBg.setColor(0, 0, 0, 0.4f);
+            energyFill = new Image(barRegion);
+            energyFill.setColor(Color.YELLOW);
+            energyFill.setOrigin(0, 0);
+            energyStack.add(energyBg);
+            energyStack.add(energyFill);
+        }
+
+        Stack shieldStack = new Stack();
+        if (barRegion != null) {
+            Image shieldBg = new Image(barRegion);
+            shieldBg.setColor(0, 0, 0, 0.4f);
+            shieldFill = new Image(barRegion);
+            shieldFill.setColor(Color.CYAN);
+            shieldFill.setOrigin(0, 0);
+            shieldStack.add(shieldBg);
+            shieldStack.add(shieldFill);
+        }
+
+        Label.LabelStyle labelStyle = new Label.LabelStyle(new BitmapFont(), Color.WHITE);
+
+        table.add(new Label("ENERGY", labelStyle)).left();
+        table.add(energyStack).width(250).height(30).padLeft(15);
+        table.row().padTop(15);
+        table.add(new Label("SHIELD", labelStyle)).left();
+        table.add(shieldStack).width(250).height(30).padLeft(15);
+
+        table.row().padTop(20);
+        Stack scoreStack = new Stack();
+        if (scoreRegion != null) {
+            Image scoreBoardBg = new Image(scoreRegion);
+            scoreBoardBg.setColor(0.8f, 0.9f, 1f, 1f);
+            scoreStack.add(scoreBoardBg);
+        }
+
+        scoreLabel = new Label("DISTANCE: 0m", labelStyle);
+        scoreLabel.setAlignment(Align.center);
+        scoreStack.add(scoreLabel);
+        table.add(scoreStack).width(300).height(70).colspan(2).center().padBottom(15f);
+
+        stage.addActor(table);
+        Gdx.input.setCursorCatched(true);
+    }
+
+    @Override
+    public void render(float delta) {
+        handleMouseLook();
+        applyPhysics(delta);
+        handleInput(delta);
+        updateRoads(delta);
+
+        if (animationController != null) animationController.update(delta);
+        updateCamera();
+
+        if (energyFill != null) energyFill.setScaleX(energy);
+        if (shieldFill != null) shieldFill.setScaleX(shield);
+
+        score += delta * 5;
+        if(scoreLabel != null) scoreLabel.setText("DISTANCE: " + (int)score + "m");
+
+        Gdx.gl.glClearColor(0.2f, 0.6f, 1.0f, 1);
+        Gdx.gl.glClear(GL20.GL_COLOR_BUFFER_BIT | GL20.GL_DEPTH_BUFFER_BIT);
+
+        sceneManager.update(delta);
+        sceneManager.render();
+
+        stage.act(delta);
+        stage.draw();
+
+        if(Gdx.input.isKeyJustPressed(Input.Keys.ESCAPE)) Gdx.input.setCursorCatched(false);
+    }
+
+    private void updateRoads(float delta) {
+        float forwardSpeed = 0;
+        float sideSpeed = 0;
+
+        // Forward/Backward Movement
+        if (currentAnimation.equals("running")) forwardSpeed = -1f;
+        else if (currentAnimation.equals("running_backward")) forwardSpeed = 1f;
+
+        // ROAD LOGIC: A = Ground moves Right (1), D = Ground moves Left (-1)right_strafe
+        if (currentAnimation.equals("right_strafe")) sideSpeed = 1f;
+        else if (currentAnimation.equals("left_strafe")) sideSpeed = -1f;
+
+        if (forwardSpeed != 0 || sideSpeed != 0) {
+            // Forward component base sa yaw
+            Vector3 forward = new Vector3(0, 0, 1).rotate(Vector3.Y, camYaw).scl(forwardSpeed);
+            // Sideways component base sa yaw
+            Vector3 side = new Vector3(1, 0, 0).rotate(Vector3.Y, camYaw).scl(sideSpeed);
+
+            roadMoveDirection.set(forward).add(side).nor().scl(roadScrollSpeed * delta);
+
+            for (Scene road : groundScenes) {
+                road.modelInstance.transform.trn(roadMoveDirection.x, 0, roadMoveDirection.z);
+
+                Vector3 pos = new Vector3();
+                road.modelInstance.transform.getTranslation(pos);
+
+                float distToChar = pos.dst(characterPosition.x, 0, characterPosition.z);
+                if (distToChar > roadLength * 6) {
+                    Vector3 diff = pos.sub(characterPosition);
+                    diff.scl(-0.8f);
+                    road.modelInstance.transform.setTranslation(characterPosition.x + diff.x, 0, characterPosition.z + diff.z);
+                }
+            }
+        }
+    }
+
+    private void applyPhysics(float delta) {
+        verticalVelocity += gravity * delta;
+        characterPosition.y += verticalVelocity * delta;
+
+        if (characterPosition.y <= 0.05f) {
+            characterPosition.y = 0.05f;
+            verticalVelocity = 0;
+            isGrounded = true;
+        } else {
+            isGrounded = false;
+        }
+    }
+
+    private void handleMouseLook() {
+        if (!Gdx.input.isCursorCatched()) return;
+        camYaw += -Gdx.input.getDeltaX() * mouseSensitivity;
+        camPitch = MathUtils.clamp(camPitch + (-Gdx.input.getDeltaY() * mouseSensitivity), -45f, 15f);
+    }
+
+    private void handleInput(float delta) {
+        if (Gdx.input.isKeyJustPressed(Input.Keys.SPACE) && isGrounded) {
+            verticalVelocity = jumpForce;
+            isGrounded = false;
+            setAnimation("jump", 1);
+        }
+
+        boolean isMoving = false;
+        float moveX = 0;
+
+        if (Gdx.input.isKeyPressed(Input.Keys.W)) { isMoving = true; }
+        if (Gdx.input.isKeyPressed(Input.Keys.S)) { isMoving = true; }
+
+        // INPUT LOGIC: A = Left (-1), D = Right (1)
+        if (Gdx.input.isKeyPressed(Input.Keys.A)) { moveX = -1; isMoving = true; }
+        if (Gdx.input.isKeyPressed(Input.Keys.D)) { moveX = 1; isMoving = true; }
+
+        String nextAnim = "idle";
+
+        if (!isGrounded) {
+            nextAnim = "jump";
+        } else if (isMoving) {
+            if (Gdx.input.isKeyPressed(Input.Keys.W)) nextAnim = "running";
+            else if (Gdx.input.isKeyPressed(Input.Keys.S)) nextAnim = "running_backward";
+
+            // ANIMATION MAPPING: A = left_strafe, D = right_strafe
+            if (Gdx.input.isKeyPressed(Input.Keys.A)) nextAnim = "left_strafe";
+            else if (Gdx.input.isKeyPressed(Input.Keys.D)) nextAnim = "right_strafe";
+        }
+
+        // Sideways movement relative sa camera
+        if (isMoving && moveX != 0) {
+            Vector3 sideways = new Vector3(moveX, 0, 0).nor().rotate(Vector3.Y, camYaw);
+            characterPosition.add(sideways.scl(moveSpeed * delta));
+        }
+
+        updateCharacterTransform();
+        setAnimation(nextAnim, (nextAnim.equals("jump") ? 1 : -1));
+
+        if(Gdx.input.isKeyPressed(Input.Keys.K)) energy = Math.max(0, energy - 0.01f);
+        if(Gdx.input.isKeyPressed(Input.Keys.L)) shield = Math.max(0, shield - 0.01f);
+    }
+
+    private void updateCharacterTransform() {
+        characterScene.modelInstance.transform.setToScaling(characterScale, characterScale, characterScale);
+        characterScene.modelInstance.transform.setTranslation(characterPosition.x, characterPosition.y, characterPosition.z);
+        characterScene.modelInstance.transform.rotate(Vector3.Y, camYaw + 180f);
+    }
+
+    private void updateCamera() {
+        float distance = 4.0f;
+        float camHeight = 1.8f;
+        float targetYOffset = 0.8f;
+
+        float x = distance * MathUtils.sinDeg(camYaw) * MathUtils.cosDeg(camPitch);
+        float z = distance * MathUtils.cosDeg(camYaw) * MathUtils.cosDeg(camPitch);
+        float y = distance * MathUtils.sinDeg(camPitch);
+
+        cam.position.set(
+            characterPosition.x - x,
+            characterPosition.y + camHeight - y,
+            characterPosition.z - z
+        );
+
+        cam.lookAt(characterPosition.x, characterPosition.y + targetYOffset, characterPosition.z);
+        cam.up.set(Vector3.Y);
+        cam.update();
+    }
+
+    private void setAnimation(String name, int loopCount) {
+        if (!currentAnimation.equals(name)) {
+            currentAnimation = name;
+            try { animationController.animate(name, loopCount, 1f, null, 0.2f); } catch (Exception e) {}
+        }
+    }
+
+    @Override public void show() {}
+    @Override public void resize(int width, int height) {
+        stage.getViewport().update(width, height, true);
+    }
+    @Override public void pause() {}
+    @Override public void resume() {}
+    @Override public void hide() {}
+    @Override public void dispose() {
+        if(sceneAsset != null) sceneAsset.dispose();
+        if(groundAsset != null) groundAsset.dispose();
+        if(sceneManager != null) sceneManager.dispose();
+        if(stage != null) stage.dispose();
+        if(uiAtlas != null) uiAtlas.dispose();
+    }
+}
